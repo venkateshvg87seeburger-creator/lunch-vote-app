@@ -37,10 +37,20 @@ let votingSettings = { mode: "auto", manualStatus: "open", activeWeekMonday: "" 
 
 function getNextWeekMonday() {
   const now = new Date();
-  const day = now.getDay();
-  const daysUntilNextMon = (day === 0) ? 1 : (8 - day);
+  const day = now.getDay(); // 0=Sun, 1=Mon, ..., 5=Fri, 6=Sat
+  const hour = now.getHours();
+
+  // Find the closest upcoming Monday
+  let daysToNextMon = (day === 0) ? 1 : (8 - day);
   const nextMon = new Date(now);
-  nextMon.setDate(now.getDate() + daysUntilNextMon);
+  nextMon.setDate(now.getDate() + daysToNextMon);
+
+  // Transition logic: if past Friday 6 PM, we vote for the following week
+  const isPastFriday6PM = (day === 5 && hour >= 18) || (day === 6) || (day === 0);
+  if (isPastFriday6PM) {
+    nextMon.setDate(nextMon.getDate() + 7);
+  }
+
   nextMon.setHours(0, 0, 0, 0);
   return nextMon;
 }
@@ -97,11 +107,9 @@ async function isVotingOpen() {
   if (votingSettings.mode === "manual") {
     return votingSettings.manualStatus === "open";
   }
-  // Auto mode
-  const now  = new Date();
-  const day  = now.getDay();
-  const hour = now.getHours();
-  return !(day === 0 && hour >= 18);
+  // Auto mode: voting is always open for "some" week.
+  // The transition happens at Friday 6 PM via getNextWeekMonday.
+  return true;
 }
 
 function formatTimestamp(iso) {
@@ -228,8 +236,8 @@ async function renderVoteScreen() {
   const open  = await isVotingOpen();
   const badge = document.getElementById("deadlineBadge");
   badge.innerHTML = open
-    ? `<div class="deadline-badge open"><div class="dot"></div>Voting open – closes Sunday 6 PM</div>`
-    : `<div class="deadline-badge closed"><div class="dot"></div>Voting closed – reopens Monday</div>`;
+    ? `<div class="deadline-badge open"><div class="dot"></div>Voting open – next week starts Friday 6 PM</div>`
+    : `<div class="deadline-badge closed"><div class="dot"></div>Voting closed</div>`;
 
   if (votingSettings.mode === "manual") {
     badge.innerHTML = votingSettings.manualStatus === "open"
@@ -298,13 +306,27 @@ async function renderCurrentWeekStatus() {
 async function renderDaysList(open) {
   const availabilitySnap = await getDocs(collection(db, "foodStatus"));
   const availMap = {};
-  availabilitySnap.forEach(doc => availMap[doc.id] = doc.data().available);
+  availabilitySnap.forEach(doc => availMap[doc.id] = doc.data());
 
   document.getElementById("daysList").innerHTML = weekDays.map((d, i) => {
     const dateObj = new Date(getNextWeekMonday());
     dateObj.setDate(dateObj.getDate() + i);
     const ymd = getYMD(dateObj);
-    const isAvail = availMap[ymd] || false;
+    const status = availMap[ymd] || {};
+    const isAvail = status.available || false;
+    const isHoliday = status.isHoliday || false;
+
+    if (isHoliday) {
+      return `
+      <div class="day-row holiday-row" id="row-${btoa(d)}">
+        <div class="day-check">✕</div>
+        <div class="day-label">
+          ${d}
+          <span class="holiday-badge">● HOLIDAY / WFH</span>
+        </div>
+      </div>
+    `;
+    }
 
     return `
     <div class="day-row ${myVotes[d] ? "selected" : ""}" id="row-${btoa(d)}"
@@ -345,14 +367,14 @@ window.submitVote = async function() {
 };
 
 function subscribeToTally() {
-  liveUnsub = onSnapshot(collection(db, "votes", weekId, "byUser"), (snap) => {
+  liveUnsub = onSnapshot(collection(db, "votes", weekId, "byUser"), async (snap) => {
     const counts = {};
     weekDays.forEach(d => counts[d] = 0);
     snap.forEach(ds => {
       const days = ds.data().days || {};
       weekDays.forEach(d => { if (days[d]) counts[d]++; });
     });
-    renderSummaryTable(counts, "tallyTable");
+    await renderSummaryTable(counts, "tallyTable");
   });
 }
 
@@ -360,7 +382,11 @@ function subscribeToTally() {
 //  SUMMARY TABLE
 // ════════════════════════════════════════════════
 
-function renderSummaryTable(counts, tableId) {
+async function renderSummaryTable(counts, tableId) {
+  const availabilitySnap = await getDocs(collection(db, "foodStatus"));
+  const availMap = {};
+  availabilitySnap.forEach(doc => availMap[doc.id] = doc.data());
+
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   document.getElementById(tableId).innerHTML = `
     <table class="summary-table">
@@ -368,19 +394,31 @@ function renderSummaryTable(counts, tableId) {
         <tr><th>Day</th><th>Date</th><th style="text-align:right">Headcount</th></tr>
       </thead>
       <tbody>
-        ${weekDays.map(d => {
+        ${weekDays.map((d, i) => {
           const [day, date, mon] = d.split(" ");
+          
+          const dateObj = new Date(getNextWeekMonday());
+          dateObj.setDate(dateObj.getDate() + i);
+          const ymd = getYMD(dateObj);
+          const status = availMap[ymd] || {};
+          const isHoliday = status.isHoliday || false;
+
           return `<tr>
-            <td><strong>${day}</strong></td>
+            <td>
+              <strong>${day}</strong>
+              ${isHoliday ? `<span class="holiday-badge" style="margin-left:5px; font-size:8px; padding:1px 5px">H/WFH</span>` : ""}
+            </td>
             <td style="color:var(--muted)">${date} ${mon}</td>
-            <td style="text-align:right"><span class="count-pill">${counts[d]} pax</span></td>
+            <td style="text-align:right">
+              <span class="count-pill ${isHoliday ? "zero" : ""}">${isHoliday ? "—" : counts[d] + " pax"}</span>
+            </td>
           </tr>`;
         }).join("")}
       </tbody>
     </table>
-    <div class="total-bar">
+    <div class="total-bar" style="display:flex; justify-content:space-between; align-items:center; padding:12px 0 4px; border-top:1.5px solid var(--border); margin-top:8px">
       <span style="color:var(--muted);font-size:12px">Total lunch orders this week</span>
-      <span class="total-num">${total}</span>
+      <span class="total-num" style="font-size:20px">${total}</span>
     </div>`;
 }
 
@@ -392,20 +430,26 @@ function renderSummaryTableForAdmin(counts, tableId, days, availability = {}) {
         <tr>
           <th>Day</th>
           <th>Date</th>
-          <th style="text-align:right">Headcount</th>
-          <th style="text-align:right">Food Available?</th>
+          <th style="text-align:right">Pax</th>
+          <th style="text-align:right">Food?</th>
+          <th style="text-align:right">H/WFH?</th>
         </tr>
       </thead>
       <tbody>
         ${days.map(d => {
           const [day, date, mon] = d.split(" ");
-          const isAvailable = availability[d] || false;
+          const status = availability[d] || {};
+          const isAvailable = status.available || false;
+          const isHoliday = status.isHoliday || false;
           return `<tr>
             <td><strong>${day}</strong></td>
             <td style="color:var(--muted)">${date} ${mon}</td>
-            <td style="text-align:right"><span class="count-pill">${counts[d]} pax</span></td>
+            <td style="text-align:right"><span class="count-pill">${counts[d]}</span></td>
             <td style="text-align:right">
-              <input type="checkbox" class="food-toggle" data-day="${d}" ${isAvailable ? "checked" : ""} style="width:18px;height:18px;cursor:pointer">
+              <input type="checkbox" class="food-toggle" data-day="${d}" ${isAvailable ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
+            </td>
+            <td style="text-align:right">
+              <input type="checkbox" class="holiday-toggle" data-day="${d}" ${isHoliday ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
             </td>
           </tr>`;
         }).join("")}
@@ -638,12 +682,12 @@ async function loadAdminTally() {
   // Fetch current availability for these days
   const availSnap = await getDocs(collection(db, "foodStatus"));
   const availMap = {};
-  availSnap.forEach(doc => availMap[doc.id] = doc.data().available);
+  availSnap.forEach(doc => availMap[doc.id] = doc.data());
   
   const currentAvailability = {};
   daysInRange.forEach(d => {
     const ymd = getYMD(d);
-    currentAvailability[formatDateToLabel(d)] = availMap[ymd] || false;
+    currentAvailability[formatDateToLabel(d)] = availMap[ymd] || {};
   });
 
   renderSummaryTableForAdmin(counts, "adminTallyTable", labels, currentAvailability);
@@ -697,12 +741,14 @@ window.saveAvailability = async function(event) {
   btn.disabled = true;
   btn.textContent = "Saving...";
 
-  const toggles = document.querySelectorAll(".food-toggle");
+  const foodToggles = document.querySelectorAll(".food-toggle");
+  const holidayToggles = document.querySelectorAll(".holiday-toggle");
   
   try {
-    for (const t of toggles) {
-      const label = t.dataset.day;
-      const isAvailable = t.checked;
+    for (let i = 0; i < foodToggles.length; i++) {
+      const label = foodToggles[i].dataset.day;
+      const isAvailable = foodToggles[i].checked;
+      const isHoliday = holidayToggles[i].checked;
       
       const fromEl = document.getElementById("adminFromDate");
       const toEl   = document.getElementById("adminToDate");
@@ -714,7 +760,10 @@ window.saveAvailability = async function(event) {
       while (curr <= to) {
         if (formatDateToLabel(curr) === label) {
           const ymd = getYMD(curr);
-          await setDoc(doc(db, "foodStatus", ymd), { available: isAvailable });
+          await setDoc(doc(db, "foodStatus", ymd), { 
+            available: isAvailable,
+            isHoliday: isHoliday
+          });
           break;
         }
         curr.setDate(curr.getDate() + 1);
