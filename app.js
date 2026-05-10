@@ -333,6 +333,7 @@ async function renderDaysList(open) {
   availabilitySnap.forEach(doc => availMap[doc.id] = doc.data());
 
   document.getElementById("daysList").innerHTML = weekDays.map((d, i) => {
+    const counts = window.currentTallyCounts || {};
     const dateObj = new Date(getNextWeekMonday());
     dateObj.setDate(dateObj.getDate() + i);
     const ymd = getYMD(dateObj);
@@ -358,7 +359,7 @@ async function renderDaysList(open) {
       <div class="day-check">${myVotes[d] ? "✓" : ""}</div>
       <div class="day-label">
         ${d}
-        ${isAvail 
+        ${(isAvail || (counts && counts[d] >= 18)) 
           ? `<span class="confirmed-badge">● FOOD CONFIRMED</span>`
           : ""}
       </div>
@@ -398,7 +399,10 @@ function subscribeToTally() {
       const days = ds.data().days || {};
       weekDays.forEach(d => { if (days[d]) counts[d]++; });
     });
+    // Store counts globally for use in other render functions
+    window.currentTallyCounts = counts;
     await renderSummaryTable(counts, "tallyTable");
+    await renderDaysList(await isVotingOpen());
   });
 }
 
@@ -727,6 +731,27 @@ async function loadAdminTally() {
 
   renderSummaryTableForAdmin(counts, "adminTallyTable", labels, currentAvailability);
   
+  // AUTO-INSERT LOGIC: No manual intervention
+  // If pax >= 18 and status not yet set, save it to DB automatically
+  let autoSavedCount = 0;
+  for (const label of labels) {
+    const pax = counts[label] || 0;
+    const status = currentAvailability[label] || {};
+    if (pax >= 18 && status.available === undefined) {
+      // Find the YMD for this label
+      const dObj = daysInRange.find(d => formatDateToLabel(d) === label);
+      if (dObj) {
+        const ymd = getYMD(dObj);
+        await setDoc(doc(db, "foodStatus", ymd), { available: true, isHoliday: !!status.isHoliday }, { merge: true });
+        autoSavedCount++;
+      }
+    }
+  }
+  if (autoSavedCount > 0) {
+    console.log(`Auto-inserted food availability for ${autoSavedCount} days.`);
+    toast(`✓ Auto-confirmed lunch for ${autoSavedCount} days (18+ votes)`, "ok");
+  }
+
   const vl = document.getElementById("adminVoterList");
   if (voters.length === 0) {
     vl.innerHTML = `<div class="empty-state">
