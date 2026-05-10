@@ -258,18 +258,30 @@ async function renderVoteScreen() {
 async function renderCurrentWeekStatus() {
   const container = document.getElementById("currentWeekStatus");
   
-  // Current week Mon-Fri
+  // Base date: Monday of the current calendar week
   const now = new Date();
   const day = now.getDay();
+  const hour = now.getHours();
   const diff = now.getDate() - day + (day === 0 ? -6 : 1);
   const mon = new Date(now.setDate(diff));
   
+  let targetMon = new Date(mon);
+  const isPastFriday6PM = (day === 5 && hour >= 18) || (day === 6) || (day === 0);
+
+  // If past Friday 6 PM, we show status for the NEXT week (the one starting this coming Monday)
+  if (isPastFriday6PM && votingSettings.mode === "auto") {
+    targetMon.setDate(mon.getDate() + 7);
+  }
+
   const days = [];
   for (let i = 0; i < 5; i++) {
-    const d = new Date(mon);
-    d.setDate(mon.getDate() + i);
+    const d = new Date(targetMon);
+    d.setDate(targetMon.getDate() + i);
     days.push(d);
   }
+
+  const dateRange = `${targetMon.getDate()} ${targetMon.toLocaleDateString("en-IN", {month:"short"})} to ${days[4].getDate()} ${days[4].toLocaleDateString("en-IN", {month:"short"})}`;
+  const title = `LUNCH STATUS — ${dateRange} (Confirmed)`;
   
   const snap = await getDocs(collection(db, "foodStatus"));
   const availMap = {};
@@ -284,7 +296,19 @@ async function renderCurrentWeekStatus() {
   });
 
   if (confirmedDays.length === 0) {
-    container.innerHTML = "";
+    container.innerHTML = `
+      <div class="card" style="background:var(--cream2); border-color:var(--border); padding:16px; animation: none;">
+        <div style="display:flex; align-items:center; gap:10px">
+          <span style="font-size:20px">ℹ️</span>
+          <div>
+            <div style="font-size:12px; font-weight:800; color:var(--muted)">${title}</div>
+            <div style="font-size:13px; font-weight:600; color:var(--text2); margin-top:2px">
+              No lunch confirmed yet for ${targetMon.toLocaleDateString("en-IN", {day:"2-digit", month:"short"})} → ${days[4].toLocaleDateString("en-IN", {day:"2-digit", month:"short"})}
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
     return;
   }
 
@@ -293,7 +317,7 @@ async function renderCurrentWeekStatus() {
       <div style="display:flex; align-items:center; gap:10px">
         <span style="font-size:20px">🍱</span>
         <div>
-          <div style="font-size:12px; font-weight:800; color:var(--teal)">LUNCH STATUS — THIS WEEK</div>
+          <div style="font-size:12px; font-weight:800; color:var(--teal)">${title}</div>
           <div style="font-size:13px; font-weight:600; color:var(--text2); margin-top:2px">
             Lunch is confirmed for: <b>${confirmedDays.join(", ")}</b>
           </div>
@@ -439,17 +463,28 @@ function renderSummaryTableForAdmin(counts, tableId, days, availability = {}) {
         ${days.map(d => {
           const [day, date, mon] = d.split(" ");
           const status = availability[d] || {};
-          const isAvailable = status.available || false;
+          const paxCount = counts[d] || 0;
+          
+          // Auto-select if pax >= 18 and not explicitly set to false
+          const isAvailable = status.available || (status.available === undefined && paxCount >= 18);
           const isHoliday = status.isHoliday || false;
+          const isAutoSelected = status.available === undefined && paxCount >= 18;
+
           return `<tr>
             <td><strong>${day}</strong></td>
             <td style="color:var(--muted)">${date} ${mon}</td>
-            <td style="text-align:right"><span class="count-pill">${counts[d]}</span></td>
             <td style="text-align:right">
-              <input type="checkbox" class="food-toggle" data-day="${d}" ${isAvailable ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
+              <span class="count-pill ${paxCount >= 18 ? "high-count" : ""}">${paxCount}</span>
             </td>
             <td style="text-align:right">
-              <input type="checkbox" class="holiday-toggle" data-day="${d}" ${isHoliday ? "checked" : ""} style="width:16px;height:16px;cursor:pointer">
+              <div style="display:flex; flex-direction:column; align-items:flex-end">
+                <input type="checkbox" class="food-toggle" data-day="${d}" ${isAvailable ? "checked" : ""} 
+                       style="width:18px;height:18px;cursor:pointer">
+                ${isAutoSelected ? `<span style="font-size:8px; color:var(--teal); font-weight:700; margin-top:2px">AUTO (18+)</span>` : ""}
+              </div>
+            </td>
+            <td style="text-align:right">
+              <input type="checkbox" class="holiday-toggle" data-day="${d}" ${isHoliday ? "checked" : ""} style="width:18px;height:18px;cursor:pointer">
             </td>
           </tr>`;
         }).join("")}
